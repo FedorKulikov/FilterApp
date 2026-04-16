@@ -48,8 +48,8 @@ MainWindow::~MainWindow()
     if (firThread.joinable()) firThread.join();
     if (iirThread.joinable()) iirThread.join();
 
-    if (receiveSocket != INVALID_SOCKET_VAL) ::close_socket(receiveSocket);
-    if (sendSocket != INVALID_SOCKET_VAL) ::close_socket(sendSocket);
+    if (receiveSocket != INVALID_SOCKET_VAL) close_socket(receiveSocket);
+    if (sendSocket != INVALID_SOCKET_VAL) close_socket(sendSocket);
 }
 
 void MainWindow::setupUI()
@@ -365,8 +365,8 @@ void MainWindow::applyNetworkSettings()
     if (firThread.joinable()) firThread.join();
     if (iirThread.joinable()) iirThread.join();
 
-    if (receiveSocket != INVALID_SOCKET_VAL) ::close_socket(receiveSocket);
-    if (sendSocket != INVALID_SOCKET_VAL) ::close_socket(sendSocket);
+    if (receiveSocket != INVALID_SOCKET_VAL) close_socket(receiveSocket);
+    if (sendSocket != INVALID_SOCKET_VAL) close_socket(sendSocket);
 
     receiveSocket = INVALID_SOCKET_VAL;
     sendSocket = INVALID_SOCKET_VAL;
@@ -407,13 +407,4 @@ void MainWindow::showComplexityAnalysis()
 {
     QString msg = "Moving Average: O(n)\nExponential: O(1)";
     QMessageBox::information(this, "Complexity Analysis", msg);
-}
-
-void MainWindow::onAutoSendToggled(bool checked)
-{
-    if (checked) {
-        autoSendTimer->start(static_cast<int>(autoSendPeriodSpin->value() * 1000));
-    } else {
-        autoSendTimer->stop();
-    }
 }
