@@ -7,8 +7,6 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-set(CMAKE_PREFIX_PATH "C:/Qt/aqt/6.8.0/6.5.3/msvc2019_64" CACHE PATH "Qt installation path")
-
 add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets PrintSupport)
