@@ -40,8 +40,11 @@ target_link_libraries(FilterApp PRIVATE
     Qt6::Core
     Qt6::Widgets
     Qt6::PrintSupport
-    Qt6::EntryPointPrivate
 )
+
+if(WIN32)
+    target_link_libraries(FilterApp PRIVATE Qt6::EntryPointPrivate)
+endif()
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(FilterApp PRIVATE Threads::Threads)
