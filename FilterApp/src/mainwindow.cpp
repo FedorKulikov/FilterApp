@@ -1,6 +1,7 @@
-﻿#include "mainwindow.h"
-#include <QMessageBox>
-#include <QGridLayout>
+#include "mainwindow.h"
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QPushButton>
@@ -8,18 +9,16 @@
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QDoubleSpinBox>
-#include <QVBoxLayout>
 #include <QComboBox>
-#include <QDebug>
-#include <algorithm>
-#include <chrono>
+#include <QMessageBox>
+#include <QThread>
 #include <cmath>
-
 #include "filters/moving_average_filter.h"
 #include "filters/exponential_filter.h"
 #include "fft.h"
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent)
 {
     setupUI();
     initNetwork();
@@ -27,23 +26,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
 
     plotTimer = new QTimer(this);
     connect(plotTimer, &QTimer::timeout, this, &MainWindow::updatePlot);
-    plotTimer->start(30);
-
-    autoSendTimer = new QTimer(this);
-    connect(autoSendTimer, &QTimer::timeout, this, &MainWindow::onAutoSendTimeout);
-    connect(autoSendCheckbox, &QCheckBox::toggled, this, &MainWindow::onAutoSendToggled);
+    plotTimer->start(50);
 
     spectrumTimer = new QTimer(this);
     connect(spectrumTimer, &QTimer::timeout, this, &MainWindow::updateSpectrum);
-    spectrumTimer->start(1000);
+    spectrumTimer->start(100);
 
+    autoSendTimer = new QTimer(this);
+    connect(autoSendTimer, &QTimer::timeout, this, &MainWindow::onAutoSendTimeout);
+
+    running = true;
     receiveThread = std::thread(&MainWindow::receiveLoop, this);
     firThread = std::thread(&MainWindow::firFilterLoop, this);
     iirThread = std::thread(&MainWindow::iirFilterLoop, this);
-
-    spectrumBufferRaw.reserve(SPECTRUM_SIZE);
-    spectrumBufferFir.reserve(SPECTRUM_SIZE);
-    spectrumBufferIir.reserve(SPECTRUM_SIZE);
 }
 
 MainWindow::~MainWindow()
@@ -52,528 +47,373 @@ MainWindow::~MainWindow()
     if (receiveThread.joinable()) receiveThread.join();
     if (firThread.joinable()) firThread.join();
     if (iirThread.joinable()) iirThread.join();
-    if (receiveSocket != INVALID_SOCKET_VAL) close_socket(receiveSocket);
-    if (sendSocket != INVALID_SOCKET_VAL) close_socket(sendSocket);
-#ifdef _WIN32
-    WSACleanup();
-#endif
+
+    if (receiveSocket != INVALID_SOCKET_VAL) ::close_socket(receiveSocket);
+    if (sendSocket != INVALID_SOCKET_VAL) ::close_socket(sendSocket);
 }
 
 void MainWindow::setupUI()
 {
     QWidget* central = new QWidget(this);
     setCentralWidget(central);
-    QVBoxLayout* mainLayout = new QVBoxLayout(central);
+    QHBoxLayout* mainLayout = new QHBoxLayout(central);
 
-    QGroupBox* sendGroup = new QGroupBox("Отправка целевого значения");
-    QHBoxLayout* sendLayout = new QHBoxLayout();
-    setpointEdit = new QLineEdit("1.0");
-    sendButton = new QPushButton("Отправить");
-    sendLayout->addWidget(new QLabel("Целевое значение:"));
-    sendLayout->addWidget(setpointEdit);
-    sendLayout->addWidget(sendButton);
-    sendGroup->setLayout(sendLayout);
-    mainLayout->addWidget(sendGroup);
+    QVBoxLayout* leftLayout = new QVBoxLayout();
+    QVBoxLayout* rightLayout = new QVBoxLayout();
 
-    QGroupBox* netGroup = new QGroupBox("Сетевые настройки");
-    QGridLayout* netLayout = new QGridLayout();
+    customPlot = new QCustomPlot();
+    customPlot->addGraph();
+    customPlot->addGraph();
+    customPlot->addGraph();
+    customPlot->graph(0)->setPen(QPen(Qt::blue));
+    customPlot->graph(1)->setPen(QPen(Qt::red));
+    customPlot->graph(2)->setPen(QPen(Qt::green));
+    customPlot->xAxis->setLabel("Time");
+    customPlot->yAxis->setLabel("Value");
+    leftLayout->addWidget(customPlot);
+
+    spectrumPlot = new QCustomPlot();
+    spectrumPlot->addGraph();
+    spectrumPlot->graph(0)->setPen(QPen(Qt::blue));
+    spectrumPlot->xAxis->setLabel("Frequency");
+    spectrumPlot->yAxis->setLabel("Magnitude");
+    leftLayout->addWidget(spectrumPlot);
+
+    QGroupBox* networkGroup = new QGroupBox("Network Settings");
+    QFormLayout* networkLayout = new QFormLayout(networkGroup);
     receiveIpEdit = new QLineEdit("127.0.0.1");
-    receivePortEdit = new QLineEdit("50006");
+    receivePortEdit = new QLineEdit("12345");
     sendIpEdit = new QLineEdit("127.0.0.1");
-    sendPortEdit = new QLineEdit("50005");
+    sendPortEdit = new QLineEdit("12346");
+    networkLayout->addRow("Receive IP:", receiveIpEdit);
+    networkLayout->addRow("Receive Port:", receivePortEdit);
+    networkLayout->addRow("Send IP:", sendIpEdit);
+    networkLayout->addRow("Send Port:", sendPortEdit);
+    QPushButton* applyButton = new QPushButton("Apply");
+    connect(applyButton, &QPushButton::clicked, this, &MainWindow::applyNetworkSettings);
+    networkLayout->addRow(applyButton);
+    rightLayout->addWidget(networkGroup);
 
-    netLayout->addWidget(new QLabel("Приём от модели (IP):"), 0, 0);
-    netLayout->addWidget(receiveIpEdit, 0, 1);
-    netLayout->addWidget(new QLabel("Порт приёма:"), 0, 2);
-    netLayout->addWidget(receivePortEdit, 0, 3);
-
-    netLayout->addWidget(new QLabel("Отправка в модель (IP):"), 1, 0);
-    netLayout->addWidget(sendIpEdit, 1, 1);
-    netLayout->addWidget(new QLabel("Порт отправки:"), 1, 2);
-    netLayout->addWidget(sendPortEdit, 1, 3);
-
-    QPushButton* applyNetButton = new QPushButton("Применить настройки");
-    netLayout->addWidget(applyNetButton, 2, 0, 1, 4);
-    netGroup->setLayout(netLayout);
-    mainLayout->addWidget(netGroup);
-
-    QGroupBox* filterGroup = new QGroupBox("Фильтры");
-    QGridLayout* filterLayout = new QGridLayout();
-    enableFilter1 = new QCheckBox("Скользящее среднее (FIR)");
-    enableFilter2 = new QCheckBox("Экспоненциальное сглаживание (IIR)");
+    QGroupBox* filterGroup = new QGroupBox("Filters");
+    QFormLayout* filterLayout = new QFormLayout(filterGroup);
+    enableFilter1 = new QCheckBox("Moving Average");
+    enableFilter2 = new QCheckBox("Exponential");
     windowSizeSpin = new QSpinBox();
+    windowSizeSpin->setRange(1, 100);
+    windowSizeSpin->setValue(5);
     alphaSpin = new QDoubleSpinBox();
-
-    windowSizeSpin->setRange(5, 200);
-    windowSizeSpin->setValue(20);
-    windowSizeSpin->setSuffix(" точек");
-
-    alphaSpin->setRange(0.01, 0.99);
-    alphaSpin->setValue(0.3);
+    alphaSpin->setRange(0.0, 1.0);
     alphaSpin->setSingleStep(0.05);
-    alphaSpin->setDecimals(2);
+    alphaSpin->setValue(0.2);
+    filterLayout->addRow(enableFilter1);
+    filterLayout->addRow("Window Size:", windowSizeSpin);
+    filterLayout->addRow(enableFilter2);
+    filterLayout->addRow("Alpha:", alphaSpin);
+    QPushButton* complexityButton = new QPushButton("Complexity Analysis");
+    connect(complexityButton, &QPushButton::clicked, this, &MainWindow::showComplexityAnalysis);
+    filterLayout->addRow(complexityButton);
+    rightLayout->addWidget(filterGroup);
 
-    filterLayout->addWidget(enableFilter1, 0, 0);
-    filterLayout->addWidget(new QLabel("Размер окна:"), 0, 1);
-    filterLayout->addWidget(windowSizeSpin, 0, 2);
-    filterLayout->addWidget(enableFilter2, 1, 0);
-    filterLayout->addWidget(new QLabel("Коэффициент Alpha:"), 1, 1);
-    filterLayout->addWidget(alphaSpin, 1, 2);
-    filterGroup->setLayout(filterLayout);
-    mainLayout->addWidget(filterGroup);
-
-    QHBoxLayout* depthLayout = new QHBoxLayout();
-    depthLayout->addWidget(new QLabel("Глубина графика (точек):"));
-    QSpinBox* depthSpin = new QSpinBox();
-    depthSpin->setRange(50, 1000);
-    depthSpin->setValue(600);
-    depthSpin->setSingleStep(50);
-    connect(depthSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::setMaxPoints);
-    depthLayout->addWidget(depthSpin);
-    mainLayout->addLayout(depthLayout);
-
-    QGroupBox* autoGroup = new QGroupBox("Автоматическая отправка");
-    QHBoxLayout* autoLayout = new QHBoxLayout();
-    autoSendCheckbox = new QCheckBox("Включить циклическую отправку");
+    QGroupBox* controlGroup = new QGroupBox("Control");
+    QFormLayout* controlLayout = new QFormLayout(controlGroup);
+    setpointEdit = new QLineEdit("0");
+    sendButton = new QPushButton("Send Setpoint");
+    connect(sendButton, &QPushButton::clicked, this, &MainWindow::sendSetpoint);
+    controlLayout->addRow("Setpoint:", setpointEdit);
+    controlLayout->addRow(sendButton);
+    autoSendCheckbox = new QCheckBox("Auto Send");
     autoSendPeriodSpin = new QDoubleSpinBox();
     autoSendPeriodSpin->setRange(0.1, 10.0);
+    autoSendPeriodSpin->setSingleStep(0.1);
     autoSendPeriodSpin->setValue(1.0);
-    autoSendPeriodSpin->setSuffix(" с");
     waveformCombo = new QComboBox();
-    waveformCombo->addItems({ "Синус", "Меандр", "Пила", "Треугольник", "Ступенька (0→5→-5)" });
-    autoLayout->addWidget(autoSendCheckbox);
-    autoLayout->addWidget(new QLabel("Период:"));
-    autoLayout->addWidget(autoSendPeriodSpin);
-    autoLayout->addWidget(new QLabel("Форма сигнала:"));
-    autoLayout->addWidget(waveformCombo);
-    autoGroup->setLayout(autoLayout);
-    mainLayout->addWidget(autoGroup);
+    waveformCombo->addItems({"Sine", "Square", "Triangle"});
+    controlLayout->addRow(autoSendCheckbox);
+    controlLayout->addRow("Period (s):", autoSendPeriodSpin);
+    controlLayout->addRow("Waveform:", waveformCombo);
+    rightLayout->addWidget(controlGroup);
 
-    QGroupBox* spectrumGroup = new QGroupBox("Спектр (dB)");
-    QVBoxLayout* spectrumLayout = new QVBoxLayout();
-    spectrumPlot = new QCustomPlot(this);
-    spectrumPlot->addGraph();
-    spectrumPlot->addGraph();
-    spectrumPlot->addGraph();
-    spectrumPlot->graph(0)->setPen(QPen(Qt::blue, 2));
-    spectrumPlot->graph(1)->setPen(QPen(Qt::red, 2));
-    spectrumPlot->graph(2)->setPen(QPen(Qt::green, 2));
-    spectrumPlot->graph(0)->setName("Исходный спектр");
-    spectrumPlot->graph(1)->setName("FIR спектр");
-    spectrumPlot->graph(2)->setName("IIR спектр");
-    spectrumPlot->xAxis->setLabel("Частота (Гц)");
-    spectrumPlot->yAxis->setLabel("Амплитуда (dB)");
-    spectrumPlot->legend->setVisible(true);
-    spectrumLayout->addWidget(spectrumPlot);
-    spectrumGroup->setLayout(spectrumLayout);
-    mainLayout->addWidget(spectrumGroup);
+    QGroupBox* displayGroup = new QGroupBox("Display");
+    QFormLayout* displayLayout = new QFormLayout(displayGroup);
+    QSpinBox* maxPointsSpin = new QSpinBox();
+    maxPointsSpin->setRange(100, 2000);
+    maxPointsSpin->setValue(600);
+    connect(maxPointsSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::setMaxPoints);
+    displayLayout->addRow("Max Points:", maxPointsSpin);
+    rightLayout->addWidget(displayGroup);
 
-    QPushButton* complexityButton = new QPushButton("Анализ сложности фильтров");
-    connect(complexityButton, &QPushButton::clicked, this, &MainWindow::showComplexityAnalysis);
-    mainLayout->addWidget(complexityButton);
-
-    customPlot = new QCustomPlot(this);
-    customPlot->addGraph();
-    customPlot->addGraph();
-    customPlot->addGraph();
-
-    customPlot->graph(0)->setPen(QPen(Qt::blue, 2));
-    customPlot->graph(1)->setPen(QPen(Qt::red, 2));
-    customPlot->graph(2)->setPen(QPen(Qt::green, 2));
-
-    customPlot->graph(0)->setName("Исходный сигнал");
-    customPlot->graph(1)->setName("Скользящее среднее");
-    customPlot->graph(2)->setName("Экспоненциальный");
-
-    customPlot->xAxis->setLabel("Время (секунды)");
-    customPlot->yAxis->setLabel("Значение");
-    customPlot->legend->setVisible(true);
-    customPlot->legend->setBrush(QBrush(QColor(255, 255, 255, 200)));
-
-    mainLayout->addWidget(customPlot, 1);
-
-    connect(sendButton, &QPushButton::clicked, this, &MainWindow::sendSetpoint);
-    connect(applyNetButton, &QPushButton::clicked, this, &MainWindow::applyNetworkSettings);
-    connect(enableFilter1, &QCheckBox::toggled, this, &MainWindow::onFilterToggled);
-    connect(enableFilter2, &QCheckBox::toggled, this, &MainWindow::onFilterToggled);
-    connect(windowSizeSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &MainWindow::onWindowSizeChanged);
-    connect(alphaSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &MainWindow::onAlphaChanged);
+    mainLayout->addLayout(leftLayout, 2);
+    mainLayout->addLayout(rightLayout, 1);
 }
 
 void MainWindow::initNetwork()
 {
 #ifdef _WIN32
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    WSADATA wsaData;
+    WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
-
-    receiveSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(50006);
-    addr.sin_addr.s_addr = INADDR_ANY;
-    bind(receiveSocket, (sockaddr*)&addr, sizeof(addr));
-
-    sendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 }
 
 void MainWindow::initFilters()
 {
-    if (filter1) delete filter1;
-    if (filter2) delete filter2;
-    filter1 = new MovingAverageFilter(windowSizeSpin->value());
-    filter2 = new ExponentialFilter(alphaSpin->value());
-}
-
-void MainWindow::onFilterToggled()
-{
-    if (filter1) filter1->reset();
-    if (filter2) filter2->reset();
-}
-
-void MainWindow::onWindowSizeChanged(int size)
-{
-    if (filter1) {
-        delete filter1;
-        filter1 = new MovingAverageFilter(size);
-    }
-}
-
-void MainWindow::onAlphaChanged(double alpha)
-{
-    if (filter2) {
-        delete filter2;
-        filter2 = new ExponentialFilter(alpha);
-    }
+    filter1 = new MovingAverageFilter(5);
+    filter2 = new ExponentialFilter(0.2);
 }
 
 void MainWindow::receiveLoop()
 {
-    while (running)
-    {
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(receivePortEdit->text().toUShort());
+    inet_pton(AF_INET, receiveIpEdit->text().toStdString().c_str(), &addr.sin_addr);
+
+    receiveSocket = socket(AF_INET, SOCK_DGRAM, 0);
+    bind(receiveSocket, (sockaddr*)&addr, sizeof(addr));
+
+    while (running) {
         char buffer[8];
-        sockaddr_in from{};
-        int fromLen = sizeof(from);
-
+        sockaddr_in from;
+        socklen_t fromLen = sizeof(from);
         int bytes = recvfrom(receiveSocket, buffer, 8, 0, (sockaddr*)&from, &fromLen);
-        if (bytes == 8)
-        {
-            uint32_t ts;
-            float value;
-            memcpy(&ts, buffer, 4);
-            memcpy(&value, buffer + 4, 4);
-
-            {
-                std::lock_guard<std::mutex> lock(rawMutex);
-                rawQueue.push((double)value);
-            }
-        }
-        else
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (bytes == 8) {
+            double value;
+            memcpy(&value, buffer, 8);
+            std::lock_guard<std::mutex> lock(rawMutex);
+            rawQueue.push(value);
         }
     }
 }
 
 void MainWindow::firFilterLoop()
 {
-    while (running)
-    {
-        double input = 0.0;
+    while (running) {
+        double value = 0;
         bool hasData = false;
-
         {
             std::lock_guard<std::mutex> lock(rawMutex);
-            if (!rawQueue.empty())
-            {
-                input = rawQueue.front();
+            if (!rawQueue.empty()) {
+                value = rawQueue.front();
                 rawQueue.pop();
                 hasData = true;
             }
         }
-
-        if (hasData)
-        {
-            double output = input;
-            if (enableFilter1->isChecked() && filter1)
-                output = filter1->process(input);
-
-            {
-                std::lock_guard<std::mutex> lock(firMutex);
-                firResultQueue.push(output);
-            }
+        if (hasData && enableFilter1->isChecked()) {
+            double filtered = filter1->process(value);
+            std::lock_guard<std::mutex> lock(firMutex);
+            firResultQueue.push(filtered);
+        } else if (hasData) {
+            std::lock_guard<std::mutex> lock(firMutex);
+            firResultQueue.push(value);
         }
-        else
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        QThread::msleep(1);
     }
 }
 
 void MainWindow::iirFilterLoop()
 {
-    while (running)
-    {
-        double input = 0.0;
+    while (running) {
+        double value = 0;
         bool hasData = false;
-
         {
-            std::lock_guard<std::mutex> lock(rawMutex);
-            if (!rawQueue.empty())
-            {
-                input = rawQueue.front();
-                rawQueue.pop();
+            std::lock_guard<std::mutex> lock(firMutex);
+            if (!firResultQueue.empty()) {
+                value = firResultQueue.front();
+                firResultQueue.pop();
                 hasData = true;
             }
         }
-
-        if (hasData)
-        {
-            double output = input;
-            if (enableFilter2->isChecked() && filter2)
-                output = filter2->process(input);
-
-            {
-                std::lock_guard<std::mutex> lock(iirMutex);
-                iirResultQueue.push(output);
-            }
+        if (hasData && enableFilter2->isChecked()) {
+            double filtered = filter2->process(value);
+            std::lock_guard<std::mutex> lock(iirMutex);
+            iirResultQueue.push(filtered);
+        } else if (hasData) {
+            std::lock_guard<std::mutex> lock(iirMutex);
+            iirResultQueue.push(value);
         }
-        else
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        QThread::msleep(1);
     }
 }
 
 void MainWindow::updatePlot()
 {
+    double rawVal = 0, filteredVal = 0;
+    bool hasRaw = false, hasFiltered = false;
+
     {
-        std::lock_guard<std::mutex> lockRaw(rawMutex);
-        std::lock_guard<std::mutex> lockFir(firMutex);
-        std::lock_guard<std::mutex> lockIir(iirMutex);
-
-        int newPoints = 0;
-        if (!rawQueue.empty())
-        {
-            size_t rawSize = rawQueue.size();
-            size_t firSize = firResultQueue.size();
-            size_t iirSize = iirResultQueue.size();
-            newPoints = static_cast<int>(std::min({ rawSize, firSize, iirSize }));
+        std::lock_guard<std::mutex> lock(iirMutex);
+        if (!iirResultQueue.empty()) {
+            filteredVal = iirResultQueue.front();
+            iirResultQueue.pop();
+            hasFiltered = true;
         }
-
-        for (int i = 0; i < newPoints; ++i)
-        {
-            double rawVal = rawQueue.front(); rawQueue.pop();
-            double firVal = firResultQueue.front(); firResultQueue.pop();
-            double iirVal = iirResultQueue.front(); iirResultQueue.pop();
-
-            rawData.append(rawVal);
-            filtered1Data.append(firVal);
-            filtered2Data.append(iirVal);
-            timeData.append(currentTime);
-            currentTime += 0.05;
+    }
+    {
+        std::lock_guard<std::mutex> lock(rawMutex);
+        if (!rawQueue.empty()) {
+            rawVal = rawQueue.front();
+            rawQueue.pop();
+            hasRaw = true;
         }
     }
 
-    if (rawData.size() > maxPoints)
-    {
-        int excess = rawData.size() - maxPoints;
-        rawData.remove(0, excess);
-        filtered1Data.remove(0, excess);
-        filtered2Data.remove(0, excess);
-        timeData.remove(0, excess);
+    if (hasRaw) {
+        rawData.append(rawVal);
+        filtered1Data.append(rawVal);
+        if (rawData.size() > maxPoints) rawData.removeFirst();
+        if (filtered1Data.size() > maxPoints) filtered1Data.removeFirst();
+    }
+    if (hasFiltered) {
+        filtered2Data.append(filteredVal);
+        if (filtered2Data.size() > maxPoints) filtered2Data.removeFirst();
     }
 
-    if (rawData.isEmpty())
-        return;
+    if (hasRaw || hasFiltered) {
+        QVector<double> x(rawData.size());
+        for (int i = 0; i < rawData.size(); ++i) x[i] = i;
+        customPlot->graph(0)->setData(x, rawData);
+        customPlot->graph(1)->setData(x, filtered1Data);
+        customPlot->graph(2)->setData(x, filtered2Data);
+        customPlot->xAxis->rescale();
+        customPlot->yAxis->rescale();
+        customPlot->replot();
+    }
+}
 
-    customPlot->graph(0)->setData(timeData, rawData);
-    customPlot->graph(1)->setData(timeData, filtered1Data);
-    customPlot->graph(2)->setData(timeData, filtered2Data);
+void MainWindow::updateSpectrum()
+{
+    std::vector<double> rawCopy, firCopy, iirCopy;
+    {
+        std::lock_guard<std::mutex> lock(rawMutex);
+        rawCopy.assign(spectrumBufferRaw.begin(), spectrumBufferRaw.end());
+    }
+    {
+        std::lock_guard<std::mutex> lock(firMutex);
+        firCopy.assign(spectrumBufferFir.begin(), spectrumBufferFir.end());
+    }
+    {
+        std::lock_guard<std::mutex> lock(iirMutex);
+        iirCopy.assign(spectrumBufferIir.begin(), spectrumBufferIir.end());
+    }
 
-    customPlot->graph(0)->setVisible(true);
-    customPlot->graph(1)->setVisible(enableFilter1->isChecked());
-    customPlot->graph(2)->setVisible(enableFilter2->isChecked());
-
-    double maxTime = timeData.last();
-    customPlot->xAxis->setRange(maxTime - 15, maxTime);
-
-    double minVal = *std::min_element(rawData.constBegin(), rawData.constEnd());
-    double maxVal = *std::max_element(rawData.constBegin(), rawData.constEnd());
-    customPlot->yAxis->setRange(minVal - 2.0, maxVal + 2.0);
-
-    customPlot->replot();
+    if (rawCopy.size() > 0) {
+        std::vector<std::complex<double>> fftRaw = fft(rawCopy);
+        QVector<double> freq(fftRaw.size()), mag(fftRaw.size());
+        for (size_t i = 0; i < fftRaw.size(); ++i) {
+            freq[i] = i;
+            mag[i] = std::abs(fftRaw[i]);
+        }
+        spectrumPlot->graph(0)->setData(freq, mag);
+        spectrumPlot->replot();
+    }
 }
 
 void MainWindow::setMaxPoints(int points)
 {
     maxPoints = points;
+    while (rawData.size() > maxPoints) rawData.removeFirst();
+    while (filtered1Data.size() > maxPoints) filtered1Data.removeFirst();
+    while (filtered2Data.size() > maxPoints) filtered2Data.removeFirst();
+}
+
+void MainWindow::onFilterToggled()
+{
+    filter1->reset();
+    filter2->reset();
+}
+
+void MainWindow::onWindowSizeChanged(int size)
+{
+    delete filter1;
+    filter1 = new MovingAverageFilter(size);
+}
+
+void MainWindow::onAlphaChanged(double alpha)
+{
+    delete filter2;
+    filter2 = new ExponentialFilter(alpha);
 }
 
 void MainWindow::sendSetpoint()
 {
-    bool ok;
-    float setpoint = setpointEdit->text().toFloat(&ok);
-    if (!ok) {
-        statusBar()->showMessage("Неверное целевое значение", 2000);
-        return;
-    }
-
-    int port = sendPortEdit->text().toInt();
-    QString ipStr = sendIpEdit->text();
+    double value = setpointEdit->text().toDouble();
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(sendPortEdit->text().toUShort());
+    inet_pton(AF_INET, sendIpEdit->text().toStdString().c_str(), &addr.sin_addr);
 
     if (sendSocket == INVALID_SOCKET_VAL) {
-        sendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (sendSocket == INVALID_SOCKET_VAL) {
-            statusBar()->showMessage("Не удалось создать сокет отправки", 2000);
-            return;
-        }
+        sendSocket = socket(AF_INET, SOCK_DGRAM, 0);
     }
 
-    sockaddr_in dest{};
-    dest.sin_family = AF_INET;
-    dest.sin_port = htons(port);
-    inet_pton(AF_INET, ipStr.toStdString().c_str(), &dest.sin_addr);
-
-    int bytesSent = sendto(sendSocket, (char*)&setpoint, sizeof(float), 0, (sockaddr*)&dest, sizeof(dest));
-
-    if (bytesSent == sizeof(float)) {
-        statusBar()->showMessage(QString("Отправлено целевое значение: %1").arg(setpoint), 2000);
-    }
-    else {
+    char buffer[8];
+    memcpy(buffer, &value, 8);
+    int result = sendto(sendSocket, buffer, 8, 0, (sockaddr*)&addr, sizeof(addr));
+    if (result == -1) {
+#ifdef _WIN32
         int err = WSAGetLastError();
-        statusBar()->showMessage(QString("Ошибка отправки, код: %1").arg(err), 2000);
+#else
+        int err = errno;
+#endif
+        QMessageBox::warning(this, "Error", QString("Send failed with error: %1").arg(err));
     }
 }
 
 void MainWindow::applyNetworkSettings()
 {
-    int port = receivePortEdit->text().toInt();
-    if (receiveSocket != INVALID_SOCKET_VAL)
-        close_socket(receiveSocket);
+    running = false;
+    if (receiveThread.joinable()) receiveThread.join();
+    if (firThread.joinable()) firThread.join();
+    if (iirThread.joinable()) iirThread.join();
 
-    receiveSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = INADDR_ANY;
-    bind(receiveSocket, (sockaddr*)&addr, sizeof(addr));
+    if (receiveSocket != INVALID_SOCKET_VAL) ::close_socket(receiveSocket);
+    if (sendSocket != INVALID_SOCKET_VAL) ::close_socket(sendSocket);
 
-    if (sendSocket != INVALID_SOCKET_VAL) {
-        close_socket(sendSocket);
-        sendSocket = INVALID_SOCKET_VAL;
-    }
-    sendSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    receiveSocket = INVALID_SOCKET_VAL;
+    sendSocket = INVALID_SOCKET_VAL;
 
-    statusBar()->showMessage("Сетевые настройки применены", 2000);
+    running = true;
+    receiveThread = std::thread(&MainWindow::receiveLoop, this);
+    firThread = std::thread(&MainWindow::firFilterLoop, this);
+    iirThread = std::thread(&MainWindow::iirFilterLoop, this);
 }
 
 void MainWindow::onAutoSendToggled(bool checked)
 {
     if (checked) {
-        autoSendTimer->start(int(autoSendPeriodSpin->value() * 1000));
-        autoSendTime = 0.0;
-    }
-    else {
+        autoSendTimer->start(static_cast<int>(autoSendPeriodSpin->value() * 1000));
+    } else {
         autoSendTimer->stop();
     }
 }
 
 void MainWindow::onAutoSendTimeout()
 {
-    double setpoint = 0.0;
     double t = autoSendTime;
-    int waveform = waveformCombo->currentIndex();
-    const double period = autoSendPeriodSpin->value();
-    double phase = fmod(t, period) / period;
-
-    switch (waveform) {
-    case 0:
-        setpoint = 5.0 * sin(2 * M_PI * phase);
-        break;
-    case 1:
-        setpoint = (phase < 0.5) ? 5.0 : -5.0;
-        break;
-    case 2:
-        setpoint = 10.0 * (phase - 0.5);
-        break;
-    case 3:
-        setpoint = 10.0 * (1.0 - 2.0 * fabs(phase - 0.5));
-        break;
-    case 4:
-    {
-        int step = int(t / period) % 3;
-        if (step == 0) setpoint = 0.0;
-        else if (step == 1) setpoint = 5.0;
-        else setpoint = -5.0;
+    double value = 0;
+    QString waveform = waveformCombo->currentText();
+    if (waveform == "Sine") {
+        value = sin(t * 2 * M_PI);
+    } else if (waveform == "Square") {
+        value = (sin(t * 2 * M_PI) >= 0) ? 1.0 : -1.0;
+    } else if (waveform == "Triangle") {
+        value = 2 * fabs(2 * (t - floor(t + 0.5))) - 1;
     }
-    break;
-    }
-    autoSendTime += 0.05;
-    setpointEdit->setText(QString::number(setpoint));
+    autoSendTime += autoSendPeriodSpin->value();
+    setpointEdit->setText(QString::number(value));
     sendSetpoint();
-}
-
-void MainWindow::updateSpectrum()
-{
-    std::lock_guard<std::mutex> lockRaw(rawMutex);
-    std::lock_guard<std::mutex> lockFir(firMutex);
-    std::lock_guard<std::mutex> lockIir(iirMutex);
-
-    auto fillBuffer = [](std::queue<double>& q, std::vector<double>& buf, int size) {
-        buf.clear();
-        std::queue<double> temp = q;
-        while (!temp.empty() && buf.size() < size) {
-            buf.push_back(temp.front());
-            temp.pop();
-        }
-        if (buf.size() < size) {
-            buf.resize(size, 0.0);
-        }
-        };
-    fillBuffer(rawQueue, spectrumBufferRaw, SPECTRUM_SIZE);
-    fillBuffer(firResultQueue, spectrumBufferFir, SPECTRUM_SIZE);
-    fillBuffer(iirResultQueue, spectrumBufferIir, SPECTRUM_SIZE);
-
-    auto spectrumRaw = FFT::amplitudeSpectrumDb(spectrumBufferRaw);
-    auto spectrumFir = FFT::amplitudeSpectrumDb(spectrumBufferFir);
-    auto spectrumIir = FFT::amplitudeSpectrumDb(spectrumBufferIir);
-
-    double fs = 20.0;
-    int n = (int)spectrumRaw.size();
-    QVector<double> freq(n);
-    for (int i = 0; i < n; ++i)
-        freq[i] = (double)i / n * (fs / 2.0);
-
-    QVector<double> rawVec(spectrumRaw.size());
-    QVector<double> firVec(spectrumFir.size());
-    QVector<double> iirVec(spectrumIir.size());
-    for (size_t i = 0; i < spectrumRaw.size(); ++i) rawVec[i] = spectrumRaw[i];
-    for (size_t i = 0; i < spectrumFir.size(); ++i) firVec[i] = spectrumFir[i];
-    for (size_t i = 0; i < spectrumIir.size(); ++i) iirVec[i] = spectrumIir[i];
-
-    spectrumPlot->graph(0)->setData(freq, rawVec);
-    spectrumPlot->graph(1)->setData(freq, firVec);
-    spectrumPlot->graph(2)->setData(freq, iirVec);
-    spectrumPlot->rescaleAxes();
-    spectrumPlot->replot();
 }
 
 void MainWindow::showComplexityAnalysis()
 {
-    QString text =
-        "=== Анализ сложности фильтров ===\n\n"
-        "1. Скользящее среднее (FIR)\n"
-        "   - Временная сложность: O(N) на отсчёт, где N = размер окна\n"
-        "   - Память: O(N) для буфера\n"
-        "   - Реализация использует очередь, сумма обновляется инкрементально -> амортизированно O(1)\n\n"
-        "2. Экспоненциальное сглаживание (IIR)\n"
-        "   - Временная сложность: O(1) на отсчёт\n"
-        "   - Память: O(1) (только предыдущее выходное значение)\n"
-        "   - Простой фильтр нижних частот первого порядка\n\n"
-        "3. БПФ для спектра\n"
-        "   - Временная сложность: O(M log M), M = 1024 (фиксировано)\n"
-        "   - Память: O(M)\n\n"
-        "Примечание: все фильтры работают в отдельных потоках, поэтому GUI остаётся отзывчивым.";
-    QMessageBox::information(this, "Анализ сложности", text);
+    QString msg = "Moving Average: O(n)\nExponential: O(1)";
+    QMessageBox::information(this, "Complexity Analysis", msg);
+}
+
+void MainWindow::onAutoSendToggled(bool checked)
+{
+    if (checked) {
+        autoSendTimer->start(static_cast<int>(autoSendPeriodSpin->value() * 1000));
+    } else {
+        autoSendTimer->stop();
+    }
 }
