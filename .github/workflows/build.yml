@@ -28,7 +28,7 @@ jobs:
       - name: Install Qt and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-base-dev qt6-base-dev-tools qt6-printsupport-dev build-essential cmake ninja-build
+          sudo apt-get install -y qt6-base-dev qt6-base-dev-tools build-essential cmake ninja-build
       - name: Configure CMake
         run: cmake -B build -S FilterApp -DCMAKE_BUILD_TYPE=Release -G Ninja
       - name: Build
