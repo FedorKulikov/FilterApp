@@ -17,7 +17,9 @@
 #include <atomic>
 #include <complex>
 #include <vector>
+#ifdef _WIN32
 #include <windows.h>
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
