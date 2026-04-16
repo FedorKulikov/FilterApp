@@ -1,12 +1,12 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-
 
 #include <QMainWindow>
 #include <QVector>
@@ -17,16 +17,12 @@
 #include <atomic>
 #include <complex>
 #include <vector>
-#ifdef _WIN32
-#include <windows.h>
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
 
 #include "qcustomplot.h"
 #include "filters/filter_base.h"
 
 #ifdef _WIN32
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
