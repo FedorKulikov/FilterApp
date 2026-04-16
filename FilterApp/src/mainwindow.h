@@ -26,19 +26,19 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#define close_socket(s) closesocket(s)
 typedef SOCKET socket_t;
 #define INVALID_SOCKET_VAL INVALID_SOCKET
 #define SOCKET_ERROR_VAL SOCKET_ERROR
-#define close_socket(s) closesocket(s)
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#define close_socket(s) ::close(s)
 typedef int socket_t;
 #define INVALID_SOCKET_VAL -1
 #define SOCKET_ERROR_VAL -1
-#define close_socket(s) close(s)
 #endif
 
 class MainWindow : public QMainWindow
