@@ -1,0 +1,8 @@
+build/
+out/
+.qt/
+.vs/
+CMakeCache.txt
+CMakeFiles/
+*.exe
+*.log
