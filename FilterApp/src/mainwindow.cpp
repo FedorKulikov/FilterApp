@@ -296,7 +296,7 @@ void MainWindow::updateSpectrum()
     }
 
     if (rawCopy.size() > 0) {
-        std::vector<std::complex<double>> fftRaw = fft(rawCopy);
+        std::vector<std::complex<double>> fftRaw = FFT::fft(rawCopy);
         QVector<double> freq(fftRaw.size()), mag(fftRaw.size());
         for (size_t i = 0; i < fftRaw.size(); ++i) {
             freq[i] = i;
